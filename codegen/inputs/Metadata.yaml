@@ -39,6 +39,8 @@
     default: 0
 - operator_name: expand
   template_name: view
+- operator_name: _reshape_alias
+  template_name: view
 - operator_name: exp
   template_name: base
 - operator_name: ge
