@@ -43,6 +43,8 @@
   template_name: base
 - operator_name: ge
   template_name: base
+- operator_name: bmm
+  template_name: base
 - operator_name: gelu
   template_name: base
   torch_prefix: torch.nn.functional
