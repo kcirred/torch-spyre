@@ -468,6 +468,22 @@ class TestOps(TestCase):
             atol=self.atol,
         )
 
+    @unittest.skip("TODO: fix so that values are similar to CPU")
+    def test_reshape_alias(self):
+        x = torch.randn(2, 3, 4, dtype=torch.float16)
+        x_spyre = x.to("spyre")
+        new_size = [2, 12]
+        new_stride = [12, 1]
+        output_spyre = torch.ops.aten._reshape_alias.default(
+            x_spyre, new_size, new_stride
+        ).to("cpu")
+        torch.testing.assert_close(
+            output_spyre,
+            torch.ops.aten._reshape_alias.default(x, new_size, new_stride),
+            rtol=self.rtol,
+            atol=self.atol,
+        )
+
     def test_sum(self):
         x = torch.arange(0, 64, dtype=self.dtype).unsqueeze(0).repeat(3, 1)
         x_spyre = x.to("spyre")
