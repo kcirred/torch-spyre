@@ -54,8 +54,8 @@ class SpyreAsyncCompile:
             # use node seq (idx in nodes) to verify whether to reuse lx for this buffer,
             # in case same Op used twice in sequence and only want pin 1 of them
             lx_addr = None
-            for k, addr in ts.allocation.items():
-                if kernel_name.split("_")[-1] == k.replace("lx:",""):
+            for k, addr in getattr(ts, "allocation", {}).items():
+                if kernel_name.split("_")[-1] == k.replace("lx:", ""):
                     lx_addr = addr
 
             if isinstance(ts, ConstantArg):
@@ -72,7 +72,6 @@ class SpyreAsyncCompile:
                         "device_layout": ts.device_layout,
                         "host_size": ts.host_size,
                         "lx_addr": lx_addr,
-
                     }
                 )
                 arg_mapping.append(ts.arg_index)

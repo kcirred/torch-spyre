@@ -453,7 +453,9 @@ def generate_sfp_op(pointers, *, op, dimensions, inputs, outputs, reduction, **k
                                 "name_": f"allocate-Tensor{i}_{'hbm' if tensor['lx_addr'] is None else 'lx'}",
                                 "prev_": "",
                                 "ldsIdx_": i,
-                                "component_": "hbm" if tensor["lx_addr"] is None else "lx",
+                                "component_": "hbm"
+                                if tensor["lx_addr"] is None
+                                else "lx",
                                 "layoutDimOrder_": tensor["dim_infos"].dim_labels,
                                 "maxDimSizes_": [-1] * len(dim_labels),
                                 "startAddressCoreCorelet_": {
@@ -478,7 +480,9 @@ def generate_sfp_op(pointers, *, op, dimensions, inputs, outputs, reduction, **k
                                                 tensor["device_layout"].device_dtype
                                             )
                                             // cores
-                                        ) if tensor["lx_addr"] is None else tensor["lx_addr"]
+                                        )
+                                        if tensor["lx_addr"] is None
+                                        else tensor["lx_addr"]
                                         for c in range(cores)
                                     },
                                 },
@@ -532,7 +536,9 @@ def generate_sfp_op(pointers, *, op, dimensions, inputs, outputs, reduction, **k
                                 "memOrg_": {
                                     "hbm": {"isPresent": 1},
                                     "lx": {"isPresent": 1},
-                                } if tensor["lx_addr"] is None else {"lx": {"isPresent": 1}},
+                                }
+                                if tensor["lx_addr"] is None
+                                else {"lx": {"isPresent": 1}},
                             }
                             for i, tensor in enumerate(tensors)
                         ],
