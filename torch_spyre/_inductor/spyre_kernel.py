@@ -534,7 +534,14 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             y = value.arguments[1]
             di_x = self.derive_dim_info(x)
             di_y = self.derive_dim_info(y)
-            di = [di_x[0], di_x[1], di_x[2], di_y[2]]
+            # di_x: [batch, M, K] or [M, K] when batch=1 and di_y: [batch, K, N] or [K, N] when batch=1
+            if len(di_y) == 2 and len(di_x) == 2:
+                di = [di_x[0], di_x[1], di_y[1]]
+                op_type = MATMUL_REDUCTION_OP
+            else:
+                # Normal case
+                di = [di_x[0], di_x[1], di_x[2], di_y[2]]
+                op_type = BATCH_MATMUL_OP
             args = [
                 create_tensor_arg(True, actuals.index(x.name), x.layout),
                 create_tensor_arg(True, actuals.index(y.name), y.layout),
@@ -546,7 +553,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 self.analyze_tensor_access(di, dst),
             ]
             self.kernel_specs.append(
-                create_kernel_spec(value.op, True, di, args, scales, op_info)
+                create_kernel_spec(op_type, True, di, args, scales, op_info)
             )
         else:
             # All other reductions have exactly one input which is a tensor

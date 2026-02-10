@@ -390,8 +390,7 @@ class TestOps(TestCase):
         z = torch.mm(x_spyre, y_spyre).to("cpu")
         torch.testing.assert_close(z, torch.mm(x, y), rtol=self.rtol, atol=self.atol)
 
-    @unittest.skip("TODO: bmm.out not implemented yet in eager")
-    def test_bmm_ab_bc(self):
+    def test_bmm_ab_bc_batch_1(self):
         B = 1
         x = torch.randn(B * self.mm_a * self.mm_b, dtype=self.dtype).view(
             B, self.mm_a, self.mm_b
@@ -404,9 +403,34 @@ class TestOps(TestCase):
         z = torch.bmm(x_spyre, y_spyre).to("cpu")
         torch.testing.assert_close(z, torch.bmm(x, y), rtol=self.rtol, atol=self.atol)
 
-    @unittest.skip("TODO: bmm.out not implemented yet in eager")
-    def test_bmm_cb_ba(self):
+    def test_bmm_cb_ba_batch_1(self):
         B = 1
+        x = torch.randn(B * self.mm_c * self.mm_b, dtype=self.dtype).view(
+            B, self.mm_c, self.mm_b
+        )
+        y = torch.randn(B * self.mm_b * self.mm_a, dtype=self.dtype).view(
+            B, self.mm_b, self.mm_a
+        )
+        x_spyre = x.to("spyre")
+        y_spyre = y.to("spyre")
+        z = torch.bmm(x_spyre, y_spyre).to("cpu")
+        torch.testing.assert_close(z, torch.bmm(x, y), rtol=self.rtol, atol=self.atol)
+
+    def test_bmm_ab_bc(self):
+        B = 2
+        x = torch.randn(B * self.mm_a * self.mm_b, dtype=self.dtype).view(
+            B, self.mm_a, self.mm_b
+        )
+        y = torch.randn(B * self.mm_b * self.mm_c, dtype=self.dtype).view(
+            B, self.mm_b, self.mm_c
+        )
+        x_spyre = x.to("spyre")
+        y_spyre = y.to("spyre")
+        z = torch.bmm(x_spyre, y_spyre).to("cpu")
+        torch.testing.assert_close(z, torch.bmm(x, y), rtol=self.rtol, atol=self.atol)
+
+    def test_bmm_cb_ba(self):
+        B = 2
         x = torch.randn(B * self.mm_c * self.mm_b, dtype=self.dtype).view(
             B, self.mm_c, self.mm_b
         )
