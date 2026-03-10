@@ -14,11 +14,12 @@
 
 from contextlib import contextmanager
 
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union, Tuple
 import torch
 import torch._decomp as decomp
 from .errors import Unsupported
 from . import customops  # noqa: F401
+from torch_spyre._C import get_device_dtype, SpyreTensorLayout, as_strided_with_layout
 
 import threading
 
@@ -329,3 +330,140 @@ def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
     else:
         zero = torch.zeros_like(input)
     return torch.eq(input, zero)
+
+
+# Monkey-patch FMS RotaryEmbedding.adjsuted_qk
+try:
+    from fms.modules.positions import RotaryEmbedding
+
+    _original_adjusted_qk = RotaryEmbedding.adjusted_qk
+
+    def spyre_rot_emb_adjusted_qk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        past_kv_state: Optional[Tuple[torch.Tensor | None, torch.Tensor | None]] = None,
+        use_cache=False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if q.device.type != "spyre":
+            print("running on CPU")
+            return _original_adjusted_qk(
+                self, q, k, position_ids, past_kv_state, use_cache
+            )
+        assert len(q.size()) == 4
+        assert len(k.size()) == 4
+
+        # Spyre implementation
+        seq_len = max(k.size(1), q.size(1))
+
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device="cpu").unsqueeze(0)
+            if (
+                use_cache
+                and past_kv_state is not None
+                and past_kv_state[0] is not None
+                and past_kv_state[0].numel() > 0
+            ):
+                position_ids += past_kv_state[0].size(2)
+
+        if self.partial_rope != 1.0:
+            q_rope = q[..., : self.dim]
+            k_rope = k[..., : self.dim]
+        else:
+            q_rope = q
+            k_rope = k
+
+        B, L, H, D = q_rope.shape  # example [B,L,H,D] = [2, 128, 8, 64]
+        new_device_shape = [L, H, D // 128, 2, B, 64]
+        new_dim_map = [1, 2, 3, 4, 0, 3]
+        new_layout = SpyreTensorLayout(
+            new_device_shape,  # [L, H, D/128, 2, B, 64]
+            new_dim_map,  # [1, 2, 3, 4, 0, 3]
+            get_device_dtype(torch.float16),
+        )
+        new_cpu_shape = (B, L, H, D // 2, 2)
+        # Strides: assuming original [B,L,H,D] was contiguous with strides [L*H*D, H*D, D, 1]
+        # For [B,L,H,D/2,2]: strides = [L*H*D, H*D, D, 2, 1]
+        new_strides = (L * H * D, H * D, D, 2, 1)
+
+        # Apply transformation
+        q_rope_spyre = as_strided_with_layout(
+            q_rope,
+            new_cpu_shape,  # [B, L, H, D/2, 2]
+            new_strides,  # [L*H*D, H*D, D, 2, 1]
+            q_rope.storage_offset(),  # Usually 0
+            new_layout,  # SpyreTensorLayout with new device shape & dim_map
+        )
+        k_rope_spyre = as_strided_with_layout(
+            k_rope,
+            new_cpu_shape,  # [B, L, H, D/2, 2]
+            new_strides,  # [L*H*D, H*D, D, 2, 1]
+            k_rope.storage_offset(),  # Usually 0
+            new_layout,  # SpyreTensorLayout with new device shape & dim_map
+        )
+
+        # q_ = q_rope.view(*q.size()[:-1], -1, 2)  # B L H D/2 2
+        # k_ = k_rope.view(*k.size()[:-1], -1, 2)
+
+        # the max start position should be based on the max first position of each sequence
+        # position_ids_cpu = position_ids.to('cpu')
+        # max_start_pos = torch.max(position_ids_cpu[:, 0])
+        max_start_pos = 4096
+        alpha = self.compute_freqs_cis(q.device, max_seq_len=max_start_pos + seq_len)
+        print(f"{alpha=}")
+        print(f"{position_ids.device=}, {position_ids.to('cpu')=}")
+        print(f"{q.device=}, {q.device.index=}")
+        # TODO: cached freqs on CPU for now
+        freqs = self.cached_freqs[q.device.index][alpha][position_ids]
+        print(f"{freqs.shape=}")
+        freqs_spyre = freqs.to(dtype=torch.float16).to("spyre")
+
+        freqs_device_shape = [L, 1, D // 128, 2, 2, B, 64]
+        freqs_dim_map = [1, 2, 3, 4, 5, 0, 3]
+
+        freqs_layout = SpyreTensorLayout(
+            freqs_device_shape, freqs_dim_map, get_device_dtype(torch.float16)
+        )
+
+        # Add dimension at position 2 for broadcasting with H
+        # freqs_expanded: [B, L, 1, D/2, 2, 2]
+        freqs_expanded = freqs_spyre[:, :, None, :, :, :].to(torch.float16)
+
+        # Assuming contiguous: strides = [L*1*D/2*2*2, 1*D/2*2*2, D/2*2*2, 2*2, 2, 1]
+        freqs_cpu_shape = (B, L, 1, D // 2, 2, 2)
+        actual_strides = freqs_expanded.stride()
+
+        freqs_transformed = as_strided_with_layout(
+            freqs_expanded,
+            freqs_cpu_shape,
+            actual_strides,
+            freqs_expanded.storage_offset(),
+            freqs_layout,
+        )
+
+        q_out = (
+            freqs_transformed[:, -q.size(1) :, :, :, :, :]
+            .mul(q_rope_spyre.unsqueeze(4))
+            .sum(5)
+            .flatten(3)
+        ).type_as(q)
+        k_out = (
+            freqs_transformed[:, -k.size(1) :, :, :, :, :]
+            .mul(k_rope_spyre.unsqueeze(4))
+            .sum(5)
+            .flatten(3)
+        ).type_as(k)
+
+        # Handle partial rope
+        if self.partial_rope != 1.0:
+            q_out = torch.cat([q_out, q[..., self.dim :]], dim=-1)
+            k_out = torch.cat([k_out, k[..., self.dim :]], dim=-1)
+
+        return q_out, k_out
+
+    # Monkey-patch the method
+    RotaryEmbedding.adjusted_qk = spyre_rot_emb_adjusted_qk
+except ImportError:
+    # triggers when FMS not installed
+    pass

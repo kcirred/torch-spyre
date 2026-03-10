@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import NamedTuple
+import math
 
 from sympy import Expr, Symbol
 
@@ -61,6 +62,44 @@ def compute_transpose_stl(
             dim_map[idx] = dim0
     return SpyreTensorLayout(
         starting_stl.device_size, dim_map, starting_stl.device_dtype
+    )
+
+
+def compute_slice_stl(
+    sliced_dim_on_host: int, sliced_size_on_host: int, starting_stl: SpyreTensorLayout
+) -> SpyreTensorLayout:
+    elems_per_stick = starting_stl.elems_per_stick()  # should always be 64 for now
+    stick_dim_on_host = starting_stl.dim_map[-1]
+
+    starting_device_size = list(starting_stl.device_size)
+    last_device_dim = len(starting_stl.device_size) - 1
+
+    # 2D tensor dim map [1, 0, 1], 3D tensor dim map [1, 2, 0, 2], 4D tensor dim map [1, 2, 3, 0, 3]
+    for current_dim, mapped_host_dim in enumerate(starting_stl.dim_map):
+        if sliced_dim_on_host != mapped_host_dim:
+            continue
+
+        is_stick_dim: bool = (
+            current_dim == last_device_dim
+        )  # stick is always on last dim
+        is_tiling_of_sticks = (not is_stick_dim) and (
+            mapped_host_dim == stick_dim_on_host
+        )
+
+        if is_stick_dim:
+            # we never update the slice on the stick dim, it is fixed at 64 for FP16
+            # ideally it already made adjustments on is_tiling_of_sticks
+            pass
+
+        elif is_tiling_of_sticks:
+            starting_device_size[current_dim] = math.ceil(
+                sliced_size_on_host / elems_per_stick
+            )
+        else:
+            starting_device_size[current_dim] = sliced_size_on_host
+
+    return SpyreTensorLayout(
+        starting_device_size, starting_stl.dim_map, starting_stl.device_dtype
     )
 
 
