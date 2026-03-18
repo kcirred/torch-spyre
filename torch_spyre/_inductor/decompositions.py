@@ -14,7 +14,7 @@
 
 from contextlib import contextmanager
 
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union, Tuple, Any
 import torch
 import torch._decomp as decomp
 from .errors import Unsupported
@@ -362,3 +362,163 @@ def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
     else:
         zero = torch.zeros_like(input)
     return torch.eq(input, zero)
+
+
+# Monkey-patch FMS RotaryEmbedding.adjsuted_qk
+try:
+    from fms.modules.positions import RotaryEmbedding
+
+    _original_adjusted_qk = RotaryEmbedding.adjusted_qk
+    _original_compute_freqs_cis = RotaryEmbedding.compute_freqs_cis
+
+    def spyre_compute_freqs_cis(self, device, max_seq_len=2048):
+        alpha = self.rope_scaling.get_alpha(max_seq_len)
+
+        if device == torch.device("meta"):
+            return alpha
+
+        dev_idx = device.index
+
+        if dev_idx not in self.cached_freqs:
+            self.cached_freqs[dev_idx] = {}
+        if dev_idx not in self.max_seq_len_cached:
+            self.max_seq_len_cached[dev_idx] = 0
+
+        if alpha not in self.cached_freqs[dev_idx]:
+            # This avoids a graph break from computing scaled_max_seq_len if not needed
+            scaled_max_seq_len = self.rope_scaling.scaled_max_seq_len(
+                max_seq_len, alpha
+            )
+            if scaled_max_seq_len > self.max_seq_len_cached[dev_idx]:
+                # This only runs if a particular combination of alpha
+                # and max_seq_len hasn't been seen before
+                freqs = self.rope_scaling.compute_scaled_freqs(device, alpha)
+                t = torch.arange(scaled_max_seq_len, device="cpu", dtype=freqs.dtype)
+                freqs = torch.outer(t, freqs.to("cpu")).float()
+                self.max_seq_len_cached[dev_idx] = scaled_max_seq_len
+                self.cached_freqs[dev_idx][alpha] = (
+                    torch.stack(
+                        [
+                            torch.cos(freqs),
+                            -torch.sin(freqs),
+                            torch.sin(freqs),
+                            torch.cos(freqs),
+                        ],
+                        dim=2,
+                    )
+                    .view(*freqs.size(), 2, 2)
+                    .permute([0, 2, 3, 1])
+                    .clone()
+                    .to(dtype=torch.float16)
+                )  # S, 64, 2, 2 -> S, 2, 2, 64
+        return alpha
+
+    def spyre_rot_emb_adjusted_qk(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        past_kv_state: Optional[Tuple[torch.Tensor | None, torch.Tensor | None]] = None,
+        use_cache=False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if q.device.type != "spyre":
+            print("running on CPU")
+            return _original_adjusted_qk(
+                self, q, k, position_ids, past_kv_state, use_cache
+            )
+        assert len(q.size()) == 4
+        assert len(k.size()) == 4
+
+        # Spyre implementation
+        seq_len = max(k.size(1), q.size(1))
+
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device="cpu").unsqueeze(0)
+            if (
+                use_cache
+                and past_kv_state is not None
+                and past_kv_state[0] is not None
+                and past_kv_state[0].numel() > 0
+            ):
+                position_ids += past_kv_state[0].size(2)
+
+        if self.partial_rope != 1.0:
+            q_rope = q[..., : self.dim]
+            k_rope: Any = k[..., : self.dim]
+        else:
+            q_rope = q
+            k_rope = k
+
+        # call interleave on the weight 64, 2
+
+        # Added transpose to make B,L,H,D -> B,H,L,D
+        # if only tranpose is called, the layout is still the same as original, but can be viewed as if it is transposed
+        # but if I call contiguous() then it will rearrange the layout to match the new transpose.
+        # q_rope = q_rope.transpose(1,2).contiguous()
+        # k_rope = k_rope.transpose(1,2).contiguous()
+
+        B, L, H, D = q_rope.shape
+        print(f"{B=}{L=},{H=},{D=}")
+
+        q_rope_spyre = q_rope.view(*q_rope.size()[:-1], 2, -1)  # B L H D/2 2
+        k_rope_spyre = k_rope.view(*k_rope.size()[:-1], 2, -1)  # B L H D/2 2
+        # 568-572 in granite.py, just remove hf_to_fms_adapter remove
+        # rot emb has to be modified to 64, 2, 2under compute_freq_cis  instead of S, 64, 2,2 -> S, 2,2, 64
+        # q_ = q_rope.view(*q.size()[:-1], -1, 2)  # B L H D/2 2
+        # k_ = k_rope.view(*k.size()[:-1], -1, 2)
+
+        # the max start position should be based on the max first position of each sequence
+        # position_ids_cpu = position_ids.to('cpu')
+        # max_start_pos = torch.max(position_ids_cpu[:, 0])
+        max_start_pos = 4096
+        if q.device.type != "spyre":
+            alpha = _original_compute_freqs_cis(
+                q.device, max_seq_len=max_start_pos + seq_len
+            )
+        else:
+            alpha = self.compute_freqs_cis(
+                q.device, max_seq_len=max_start_pos + seq_len
+            )
+        freqs = self.cached_freqs[q.device.index][alpha][position_ids]
+        print(f"{freqs.shape=}")
+        freqs_spyre = freqs.to(dtype=torch.float16).to("spyre")  # [B, L, D/2, 2, 2]
+        print(f"{freqs_spyre.shape=}")
+        freqs_expanded = freqs_spyre.unsqueeze(1)
+        print(f"{freqs_expanded.shape=}")
+
+        print(f"{q_rope_spyre.shape=}")
+
+        freqs_q_modified = freqs_spyre[
+            :, -q_rope_spyre.size(1) :, :, :, :
+        ]  # [B, L, D/2, 2, 2]
+        print(f"{freqs_q_modified.shape=}")
+        freqs_q_modified = freqs_q_modified.unsqueeze(2)
+        print(f"{freqs_q_modified.shape=}")
+        q_rope_modified = q_rope_spyre.unsqueeze(-2)
+        print(f"{q_rope_modified.shape=}")
+
+        q_out = (
+            freqs_q_modified.mul(q_rope_modified)
+            # .sum(5)
+            # .flatten(3)
+        ).type_as(q)
+        k_out = (
+            freqs_spyre[:, -k_rope_spyre.size(1) :, :, :, :]
+            .unsqueeze(2)  # -> [1, L, 1, 1,1,2,D/2]
+            .mul(k_rope_spyre.unsqueeze(-2))  # [B, L, H, D/2, 1, 2] -> [B,L,H,1,2,D/2]
+            # .sum(5)
+            # .flatten(3)
+        ).type_as(k)
+
+        # Handle partial rope
+        if self.partial_rope != 1.0:
+            q_out = torch.cat([q_out, q[..., self.dim :]], dim=-1)
+            k_out = torch.cat([k_out, k[..., self.dim :]], dim=-1)
+
+        return q_out, k_out
+
+    RotaryEmbedding.adjusted_qk = spyre_rot_emb_adjusted_qk
+    RotaryEmbedding.compute_freqs_cis = spyre_compute_freqs_cis
+except ImportError:
+    # triggers when FMS not installed
+    pass

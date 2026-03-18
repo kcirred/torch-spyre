@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import Any
 
 from sympy import Symbol
 
@@ -196,10 +197,12 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         in_device_coords = [device_coordinates(arg.layout, arg.dep) for arg in args]
         out_coords = host_coordinates(output, output_dep)
 
+        print(f"{in_coords=}, {out_coords=}, {in_device_coords=}")
         # Stick compatability check.
         # For all tensors whose stick dimension is being iterated over,
         # the indexing expression must be identical.
-        stick_exprs = set()
+        stick_exprs: set[Any] = set()
+        print(f"{stick_exprs=}")
         for idc in in_device_coords:
             if idc[-1] != 0:
                 stick_exprs.add(idc[-1])
