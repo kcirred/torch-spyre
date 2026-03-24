@@ -14,7 +14,11 @@
 
 import functools
 import torch
+<<<<<<< HEAD
 import os
+=======
+import pytest
+>>>>>>> 3c6cfdd (added feature to mark expect test fail)
 
 DEVICE = torch.device("spyre")
 
@@ -332,16 +336,30 @@ class ParameterizedTestMeta(type):
 
             ops_dict = cases["ops_dict"] if "ops_dict" in cases else None
             param_sets = cases["param_sets"]
+            expect_fail = cases.get("expect_fail", [])
 
             for test_case, params in param_sets.items():
                 if ops_dict:
                     # ---- Cross product: ops × cases ----
                     for op_name, op in ops_dict.items():
 
-                        def make_test(_base_func, _op, _params):
+                        def make_test(
+                            _base_func, _op, _params, _test_case, _expect_fail
+                        ):
                             @functools.wraps(_base_func)
                             def test(self):
-                                _base_func(self, _op, *_params)
+                                if _test_case in _expect_fail:
+                                    try:
+                                        _base_func(self, _op, *_params)
+                                        pytest.xfail(
+                                            f"Expected failure for {_test_case}"
+                                        )
+                                    except Exception:
+                                        pytest.xfail(
+                                            f"Expected failure for {_test_case}"
+                                        )
+                                else:
+                                    _base_func(self, _op, *_params)
 
                             # Propagate unittest.skip from base
                             if getattr(_base_func, "__unittest_skip__", False):
@@ -357,13 +375,22 @@ class ParameterizedTestMeta(type):
                         assert test_name not in namespace, (
                             f"Test name conflict: {test_name}"
                         )
-                        namespace[test_name] = make_test(base_func, op, params)
+                        namespace[test_name] = make_test(
+                            base_func, op, params, test_case, expect_fail
+                        )
                 else:
                     # ---- Original per-case expansion ----
-                    def make_test(_base_func, _params):
+                    def make_test(_base_func, _params, _test_case, _expect_fail):
                         @functools.wraps(_base_func)
                         def test(self):
-                            _base_func(self, *_params)
+                            if _test_case in _expect_fail:
+                                try:
+                                    _base_func(self, *_params)
+                                    pytest.xfail(f"Expected failure for {_test_case}")
+                                except Exception:
+                                    pytest.xfail(f"Expected failure for {_test_case}")
+                            else:
+                                _base_func(self, *_params)
 
                         if getattr(_base_func, "__unittest_skip__", False):
                             setattr(test, "__unittest_skip__", True)
@@ -378,7 +405,9 @@ class ParameterizedTestMeta(type):
                     assert test_name not in namespace, (
                         f"Test name conflict: {test_name}"
                     )
-                    namespace[test_name] = make_test(base_func, params)
+                    namespace[test_name] = make_test(
+                        base_func, params, test_case, expect_fail
+                    )
 
             # Remove base function if parameterized
             to_delete.add(base_func_name)
