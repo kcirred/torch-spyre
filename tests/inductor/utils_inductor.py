@@ -14,11 +14,8 @@
 
 import functools
 import torch
-<<<<<<< HEAD
 import os
-=======
 import pytest
->>>>>>> 3c6cfdd (added feature to mark expect test fail)
 
 DEVICE = torch.device("spyre")
 
@@ -351,8 +348,9 @@ class ParameterizedTestMeta(type):
                                 if _test_case in _expect_fail:
                                     try:
                                         _base_func(self, _op, *_params)
-                                        pytest.xfail(
-                                            f"Expected failure for {_test_case}"
+                                        pytest.fail(
+                                            f"Test {_test_case} passed but was marked as expect_fail. "
+                                            f"Remove '{_test_case}' from expect_fail list."
                                         )
                                     except Exception:
                                         pytest.xfail(
@@ -386,7 +384,10 @@ class ParameterizedTestMeta(type):
                             if _test_case in _expect_fail:
                                 try:
                                     _base_func(self, *_params)
-                                    pytest.xfail(f"Expected failure for {_test_case}")
+                                    pytest.fail(
+                                        f"Test {_test_case} passed but was marked as expect_fail. "
+                                        f"Remove '{_test_case}' from expect_fail list."
+                                    )
                                 except Exception:
                                     pytest.xfail(f"Expected failure for {_test_case}")
                             else:
