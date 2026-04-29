@@ -428,24 +428,10 @@ class ParameterizedTestMeta(type):
                     # ---- Cross product: ops × cases ----
                     for op_name, op in ops_dict.items():
 
-                        def make_test(
-                            _base_func, _op, _params, _test_case, _expect_fail
-                        ):
+                        def make_test(_base_func, _op, _params):
                             @functools.wraps(_base_func)
                             def test(self):
-                                if _test_case in _expect_fail:
-                                    try:
-                                        _base_func(self, _op, *_params)
-                                        pytest.fail(
-                                            f"Test {_test_case} passed but was marked as expect_fail. "
-                                            f"Remove '{_test_case}' from expect_fail list."
-                                        )
-                                    except Exception:
-                                        pytest.xfail(
-                                            f"Expected failure for {_test_case}"
-                                        )
-                                else:
-                                    _base_func(self, _op, *_params)
+                                _base_func(self, _op, *_params)
 
                             # Propagate unittest.skip from base
                             if getattr(_base_func, "__unittest_skip__", False):
@@ -461,25 +447,17 @@ class ParameterizedTestMeta(type):
                         assert test_name not in namespace, (
                             f"Test name conflict: {test_name}"
                         )
-                        namespace[test_name] = make_test(
-                            base_func, op, params, test_case, expect_fail
-                        )
+                        namespace[test_name] = make_test(base_func, op, params)
+                        if test_case in expect_fail:
+                            namespace[test_name] = pytest.mark.xfail(
+                                reason=f"Expected fail for {test_case}", strict=True
+                            )(namespace[test_name])
                 else:
                     # ---- Original per-case expansion ----
-                    def make_test(_base_func, _params, _test_case, _expect_fail):
+                    def make_test(_base_func, _params):
                         @functools.wraps(_base_func)
                         def test(self):
-                            if _test_case in _expect_fail:
-                                try:
-                                    _base_func(self, *_params)
-                                    pytest.fail(
-                                        f"Test {_test_case} passed but was marked as expect_fail. "
-                                        f"Remove '{_test_case}' from expect_fail list."
-                                    )
-                                except Exception:
-                                    pytest.xfail(f"Expected failure for {_test_case}")
-                            else:
-                                _base_func(self, *_params)
+                            _base_func(self, *_params)
 
                         if getattr(_base_func, "__unittest_skip__", False):
                             setattr(test, "__unittest_skip__", True)
@@ -494,9 +472,11 @@ class ParameterizedTestMeta(type):
                     assert test_name not in namespace, (
                         f"Test name conflict: {test_name}"
                     )
-                    namespace[test_name] = make_test(
-                        base_func, params, test_case, expect_fail
-                    )
+                    namespace[test_name] = make_test(base_func, params)
+                    if test_case in expect_fail:
+                        namespace[test_name] = pytest.mark.xfail(
+                            reason=f"Expected fail for {test_case}", strict=True
+                        )(namespace[test_name])
 
             # Remove base function if parameterized
             to_delete.add(base_func_name)
